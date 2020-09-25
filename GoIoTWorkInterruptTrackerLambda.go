@@ -1,14 +1,13 @@
 package main
 
 import (
-	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
@@ -21,35 +20,37 @@ var (
 	ddbInputVars ddbVars
 )
 
-/*
-* type MyEvent struct {
-*	Name string `json:"name"`
-* }
- */
-
 /*************************************
+Sample Event Data to configure structs for 1-click
 {
-  deviceInfo: {
-    deviceId: 'G030PM037162UXE3',
-    type: 'button',
-    remainingLife: 99.05,
-    attributes: {
-      projectRegion: 'us-east-1',
-      projectName: 'LightSwitch',
-      placementName: 'BathroomLightSwitch',
-      deviceTemplateName: 'DeviceType'
+    "deviceEvent": {
+      "buttonClicked": {
+        "clickType": "SINGLE",
+        "reportedTime": "2018-05-04T23:26:33.747Z"
+      }
+    },
+    "deviceInfo": {
+      "attributes": {
+        "key3": "value3",
+        "key1": "value1",
+        "key4": "value4"
+      },
+      "type": "button",
+      "deviceId": " G030PMXXXXXXXXXX ",
+      "remainingLife": 5.00
+    },
+    "placementInfo": {
+      "projectName": "test",
+      "placementName": "myPlacement",
+      "attributes": {
+        "location": "Seattle",
+        "equipment": "printer"
+      },
+      "devices": {
+        "myButton": " G030PMXXXXXXXXXX "
+      }
     }
-  },
-  deviceEvent: {
-    buttonClicked: { clickType: 'DOUBLE', reportedTime: '2019-12-22T04:32:28.325Z' }
-  },
-  placementInfo: {
-    projectName: 'LightSwitch',
-    placementName: 'BathroomLightSwitch',
-    attributes: {},
-    devices: { DeviceType: 'G030PM037162UXE3' }
   }
-}
 *************************************/
 
 type ddbVars struct {
@@ -58,10 +59,37 @@ type ddbVars struct {
 	tableKey string
 }
 
-func handleRequest(ctx context.Context, req events.IoTButtonEvent) (resultJSON map[string]*dynamodb.AttributeValue, err error) {
+type iotButtonEvent struct {
+	DeviceInfo  iotButtonDeviceInfo  `json:"deviceInfo"`
+	DeviceEvent iotButtonDeviceEvent `json:"deviceEvent"`
+}
+
+type iotButtonDeviceEvent struct {
+	ButtonClicked iotButtonClicked `json:"buttonClicked"`
+}
+
+type iotButtonClicked struct {
+	ClickType    string `json:"clickType"`
+	ReportedTime string `json:"reportedTime"`
+}
+
+type iotButtonDeviceInfo struct {
+	SerialNumber  string  `json:"deviceId"`
+	RemainingLife float64 `json:"remainingLife"`
+}
+
+func handleRequest(req iotButtonEvent) (resultJSON map[string]*dynamodb.AttributeValue, err error) {
 	inputTime := time.Now().UTC().Unix()
-	ddbTablePrimaryKeyValue := strings.Join([]string{req.SerialNumber, strconv.FormatInt(inputTime, 10)}, "_")
-	fmt.Printf("Request details:\n%v", req)
+	serial := req.DeviceInfo.SerialNumber
+	clickType := req.DeviceEvent.ButtonClicked.ClickType
+	timestamp := req.DeviceEvent.ButtonClicked.ReportedTime
+	batteryLife := req.DeviceInfo.RemainingLife
+	ddbTablePrimaryKeyValue := strings.Join([]string{serial, strconv.FormatInt(inputTime, 10)}, "_")
+	prettyJSON, err := json.MarshalIndent(req, "", "  ")
+	if err != nil {
+		fmt.Printf("Could not unmarshal json. Error:\n%v", err)
+	}
+	fmt.Printf("Request details:\n%s", string(prettyJSON))
 
 	input := &dynamodb.PutItemInput{
 		Item: map[string]*dynamodb.AttributeValue{
@@ -69,12 +97,23 @@ func handleRequest(ctx context.Context, req events.IoTButtonEvent) (resultJSON m
 				S: aws.String(ddbTablePrimaryKeyValue),
 			},
 			"clickType": {
-				S: aws.String(req.ClickType),
+				S: aws.String(clickType),
+			},
+			"reportedTime": {
+				S: aws.String(timestamp),
+			},
+			"remainingLife": {
+				N: aws.String(strconv.FormatFloat(batteryLife, 'f', -1, 64)),
+			},
+			"deviceId": {
+				S: aws.String(serial),
 			},
 		},
 		ReturnConsumedCapacity: aws.String("TOTAL"),
 		TableName:              aws.String(ddbInputVars.table),
 	}
+
+	fmt.Printf("DDB input: \n%v", input)
 
 	result, err := ddbClient.PutItem(input)
 	if err != nil {
@@ -103,6 +142,7 @@ func handleRequest(ctx context.Context, req events.IoTButtonEvent) (resultJSON m
 			fmt.Println(err.Error())
 		}
 	}
+	fmt.Printf("%v", result)
 	return result.Attributes, err
 }
 
